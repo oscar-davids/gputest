@@ -19,6 +19,11 @@
 #include <device_launch_parameters.h>
 #include <time.h>
 
+#include "opencv2/imgproc.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/gpu/gpu.hpp"
+
+#include "bmpio.h"
 //using namespace std;
 using std::ifstream;
 using std::string;
@@ -28,21 +33,27 @@ using std::ios;
 using std::setiosflags;
 using std::setprecision;
 
+using namespace cv;
+
 //#define length 8
 #define PI 3.14159265
 #define length 256
-#define block_len 4
+#define block_len 16
 
-cudaError_t dctWithCuda_1(const double *d, double *D);
+#define IMG_WIDTH	480
+#define IMG_HEIGHT	270
 
-cudaError_t dctWithCuda_2(const double *f, double *F);
 
-void dct(double *f, double *F){
+cudaError_t dctWithCuda_1(const float *d, float *D);
+
+cudaError_t dctWithCuda_2(const float *f, float *F, int nwidth, int nheight);
+
+void dct(float *f, float *F){
 	int i,j,t;
-	//double data[length]={0.0};
-	double tmp;
+	//float data[length]={0.0};
+	float tmp;
 
-	double data[length] = {0.0};
+	float data[length] = {0.0};
 	for(t=0; t<length; t++)
 	{
 		for (i=0; i<length; i++)
@@ -52,7 +63,7 @@ void dct(double *f, double *F){
 		{
 			if(i==0)
 			{
-				tmp = (double)(1.0/sqrt(1.0*length));
+				tmp = (float)(1.0/sqrt(1.0*length));
 				F[t*length+i] = 0.0;//why use F[bid]? Do transpose at the same time.
 				for(j=0; j<length; j++)
 					F[t*length+i] +=data[j] ;
@@ -60,11 +71,11 @@ void dct(double *f, double *F){
 			}
 			else
 			{
-				tmp = (double)(sqrt(2.0/(1.0*length)));
+				tmp = (float)(sqrt(2.0/(1.0*length)));
 				for(i=1; i<length; i++){
 					F[t*length+i] = 0;
 					for(j=0; j<length; j++)
-						F[t*length+i] += (double)(data[j]*cos((2*j+1)*i*PI/(2.0*length)));
+						F[t*length+i] += (float)(data[j]*cos((2*j+1)*i*PI/(2.0*length)));
 					F[t*length+i] *= tmp;
 				}
 			}
@@ -79,7 +90,7 @@ void dct(double *f, double *F){
 		{
 			if(i==0)
 			{
-				tmp=(double)(1.0/sqrt(1.0*length));
+				tmp=(float)(1.0/sqrt(1.0*length));
 				F[t]=0;
 				for(j=0; j<length; j++)
 					F[t] += data[j];
@@ -87,12 +98,12 @@ void dct(double *f, double *F){
 			}
 			else
 			{
-				tmp = (double)(sqrt(2.0/(1.0*length)));
+				tmp = (float)(sqrt(2.0/(1.0*length)));
 				for(i=1; i<length; i++)
 				{
 					F[i*length+t] = 0;
 					for(j=0; j<length; j++)
-						F[i*length+t] += (double)(data[j]*cos((2*j+1)*i*PI/(2*length)));
+						F[i*length+t] += (float)(data[j]*cos((2*j+1)*i*PI/(2*length)));
 					F[i*length+t] *= tmp;
 				}
 			}
@@ -100,32 +111,32 @@ void dct(double *f, double *F){
 	}
 }
 
-__global__ void dct_1(const double *f,double *F){
+__global__ void dct_1(const float *f,float *F){
 	int bid = blockIdx.x;
 	//int tid = threadIdx.x;
 	int i,j;
-	//double data[length]={0.0};
-	double tmp;
+	//float data[length]={0.0};
+	float tmp;
 	//printf("");
 	if(bid<length){
-		double data[length];
+		float data[length];
 		for (i=0; i<length; i++)
 			data[i] = f[bid*length+i];//load row data from f.
 		__syncthreads();
 		for(i=0; i<length; i++){
 			if(i==0){
-				tmp = (double)(1.0/sqrt(1.0*length));
+				tmp = (float)(1.0/sqrt(1.0*length));
 				F[bid * length + i] = 0.0;
 				for(j=0; j<length; j++)
 					F[bid*length+i] +=data[j] ;
 				F[bid*length] *= tmp;
 			}
 			else{
-				tmp = (double)(sqrt(2.0/(1.0*length)));
+				tmp = (float)(sqrt(2.0/(1.0*length)));
 				for(i=1; i<length; i++){
 					F[bid*length+i] = 0;
 					for(j=0; j<length; j++)
-						F[bid*length+i] += (double)(data[j]*cos((2*j+1)*i*PI/(2*length)));
+						F[bid*length+i] += (float)(data[j]*cos((2*j+1)*i*PI/(2*length)));
 					F[bid*length+i] *= tmp;
 				}
 			}
@@ -136,18 +147,18 @@ __global__ void dct_1(const double *f,double *F){
 		__syncthreads();
 		for(i=0; i<length; i++){
 			if(i==0){
-				tmp=(double)(1.0/sqrt(1.0*length));
+				tmp=(float)(1.0/sqrt(1.0*length));
 				F[bid]=0;
 				for(j=0; j<length; j++)
 					F[bid] += data[j];
 				F[bid] *= tmp;
 			}
 			else{
-				tmp = (double)(sqrt(2.0/(1.0*length)));
+				tmp = (float)(sqrt(2.0/(1.0*length)));
 				for(i=1; i<length; i++){
 					F[i*length+bid] = 0;
 					for(j=0; j<length; j++)
-						F[i*length+bid] += (double)(data[j]*cos((2*j+1)*i*PI/(2*length)));
+						F[i*length+bid] += (float)(data[j]*cos((2*j+1)*i*PI/(2*length)));
 					F[i*length+bid] *= tmp;
 				}
 			}
@@ -156,31 +167,33 @@ __global__ void dct_1(const double *f,double *F){
 	}
 }
 
-__global__ void dct_2(const double *f, double *F){
-	int tidy = blockIdx.x*blockDim.x + threadIdx.x;
-	int tidx = blockIdx.y*blockDim.y + threadIdx.y;
-	int index = tidx*length + tidy;
+__global__ void dct_2(const float *f, float *F, int nwidth, int nheight){
+	int tidx = blockIdx.x*blockDim.x + threadIdx.x;
+	int tidy = blockIdx.y*blockDim.y + threadIdx.y;
+	int index = tidy * nwidth + tidx;
 	int i;
-	double tmp;
-	double beta ,alfa;
+	float tmp;
+	float beta ,alfa;
 	if(tidx == 0)
-		beta = sqrt(1.0/length);
+		beta = sqrt(1.0/ nwidth);
 	else
-		beta = sqrt(2.0/length);
+		beta = sqrt(2.0/ nwidth);
+
 	if(tidy == 0)
-		alfa = sqrt(1.0/length);
+		alfa = sqrt(1.0/ nheight);
 	else
-		alfa = sqrt(2.0/length);
-	if(tidx<length && tidy<length)
+		alfa = sqrt(2.0/ nheight);
+
+	if(tidx< nwidth && tidy< nheight)
 	{
-		for(i=0; i<length*length; i++)
+		for(i=0; i< nwidth * nheight; i++)
 		{
-			int x = i/length;
-			int y = i%length;
-			tmp += ((double)f[i])*cos((2*x+1)*tidx*PI/(2.0*length))*
-					cos((2*y+1)*tidy*PI/(2.0*length));
+			int x = i % nwidth;
+			int y = i / nwidth;
+			tmp += f[i]*::cos((2*x+1)*tidx*PI/(2.0*nwidth))*
+				::cos((2*y+1)*tidy*PI/(2.0*nheight));
 		}
-		F[index]=(double)alfa * beta * tmp;
+		F[index]=(float)alfa * beta * tmp;
 	}
 }
 
@@ -188,15 +201,15 @@ int main(){
 	ifstream infile("gradient.txt");
 	int i=0;
 	string line;
-	//double f[length*length] = {0,0};
-	//double F0[length*length] = {0.0};
-	//double F1[length*length] = {0.0};
-	//double F2[length*length] = {0.0};
+	//float f[length*length] = {0,0};
+	//float F0[length*length] = {0.0};
+	//float F1[length*length] = {0.0};
+	//float F2[length*length] = {0.0};
 
-	double *f = (double*)malloc(length*length * sizeof(double));
-	double *F0 = (double*)malloc(length*length * sizeof(double));
-	double *F1 = (double*)malloc(length*length * sizeof(double));
-	double *F2 = (double*)malloc(length*length * sizeof(double));
+	float *f = (float*)malloc(length*length * sizeof(float));
+	float *F0 = (float*)malloc(length*length * sizeof(float));
+	float *F1 = (float*)malloc(length*length * sizeof(float));
+	float *F2 = (float*)malloc(IMG_WIDTH *IMG_HEIGHT * sizeof(float));
 	
 
 	while(i<length*length){
@@ -206,6 +219,29 @@ int main(){
 		}
 		i++;
 	}
+
+	Mat reference_frame, rendition_frame, next_reference_frame, next_rendition_frame;
+	Mat reference_frame_v, rendition_frame_v, next_reference_frame_v, next_rendition_frame_v;
+	Mat reference_frame_float, rendition_frame_float, reference_dct, rendition_dct;
+
+	reference_frame = imread("d:/tmp/bmptest/reference_frame.bmp");
+	rendition_frame = imread("d:/tmp/bmptest/rendition_frame.bmp");
+	next_reference_frame = imread("d:/tmp/bmptest/next_reference_frame.bmp");
+	next_rendition_frame = imread("d:/tmp/bmptest/next_rendition_frame.bmp");
+
+	cvtColor(reference_frame, reference_frame_v, COLOR_BGR2HSV);
+	cvtColor(rendition_frame, rendition_frame_v, COLOR_BGR2HSV);
+	cvtColor(next_reference_frame, next_reference_frame_v, COLOR_BGR2HSV);
+	//cvtColor(next_rendition_frame, next_rendition_frame_v, COLOR_BGR2HSV);
+
+	extractChannel(reference_frame_v, reference_frame_v, 2);
+	extractChannel(rendition_frame_v, rendition_frame_v, 2);
+	extractChannel(next_reference_frame_v, next_reference_frame_v, 2);
+	//extractChannel(next_rendition_frame_v, next_rendition_frame_v, 2);
+
+	reference_frame_v.convertTo(reference_frame_v, CV_32FC1, 1.0 / 255.0);
+	rendition_frame_v.convertTo(rendition_frame_v, CV_32FC1, 1.0 / 255.0);
+
 //	cout<<"before"<<endl;
 //	for(i=0; i<length*length; i++){
 //			cout<<f[i]<<" ";
@@ -260,7 +296,7 @@ int main(){
 //			cout << endl;
 //	}
 
-
+#if 0
 	/*
 	 * excute dct_1()
 	 */
@@ -282,6 +318,7 @@ int main(){
 	printf("excute1 time: %f (ms)\n",time1);
 	cudaEventDestroy(start1);    //destory the event
 	cudaEventDestroy(stop1);
+#endif
 
 //	cout<<"----------------dct_1()-----------"<<endl;
 //	for (i = 0; i < length * length; i++)
@@ -303,7 +340,7 @@ int main(){
 	 */
 	star2 = clock();
 	cudaEventRecord(start2, 0 );
-	cudaError_t cudaStatus_ = dctWithCuda_2(f,F2);
+	cudaError_t cudaStatus_ = dctWithCuda_2((float*)reference_frame_v.data,F2, IMG_WIDTH, IMG_HEIGHT);
 	if (cudaStatus_ != cudaSuccess)
 	{
 			fprintf(stderr, "dctWithCuda_1 failed!");
@@ -319,6 +356,18 @@ int main(){
 	printf("excute2 time: %f (ms)\n",time2);
 	cudaEventDestroy(start2);    //destory the event
 	cudaEventDestroy(stop2);
+
+	WriteFloatBmp("d:/tmp/bmptest/2ddct_frame.bmp", 480, 270, (float*)F2);
+
+
+	cv::gpu::GpuMat gmatreference_frame_v, gmatreference_dct, gmatrendition_dct, gmatdiff_dct;
+
+	gmatreference_frame_v.upload(reference_frame_v);
+	cv::gpu::dct2d(gmatreference_frame_v, gmatreference_dct);
+	Mat tmp_frame;
+	gmatreference_dct.download(tmp_frame);
+	WriteFloatBmp("d:/tmp/bmptest/2gpu_dct_reference_frame.bmp", 480, 270, (float*)tmp_frame.data);
+
 
 //	for (i = 0; i < length * length; i++)
 //	{
@@ -357,9 +406,9 @@ int main(){
 
 }
 
-cudaError_t dctWithCuda_1(const double *d, double *D){
-	double *dev_d = 0;
-	double *dev_D = 0;
+cudaError_t dctWithCuda_1(const float *d, float *D){
+	float *dev_d = 0;
+	float *dev_D = 0;
 	float time=0;
 	cudaError_t cudaStatus;
 
@@ -369,20 +418,20 @@ cudaError_t dctWithCuda_1(const double *d, double *D){
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_d,length *length* sizeof(double));
+	cudaStatus = cudaMalloc((void**)&dev_d,length *length* sizeof(float));
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_D,length *length* sizeof(double));
+	cudaStatus = cudaMalloc((void**)&dev_D,length *length* sizeof(float));
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
 
 	//copy input vectors from host memory to GPU buffers.
-	cudaStatus = cudaMemcpy(dev_d, d,length *length*sizeof(double),cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(dev_d, d,length *length*sizeof(float),cudaMemcpyHostToDevice);
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMemcpy-- failed");
 		goto Error;
@@ -401,7 +450,7 @@ cudaError_t dctWithCuda_1(const double *d, double *D){
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0 );
-    cudaStatus = cudaMemcpy(D, dev_D, length*length* sizeof(double), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(D, dev_D, length*length* sizeof(float), cudaMemcpyDeviceToHost);
         if (cudaStatus != cudaSuccess) {
             fprintf(stderr, "cudaMemcpy failed!");
             goto Error;
@@ -422,9 +471,9 @@ Error:
 }
 
 
-cudaError_t dctWithCuda_2(const double *d, double *D){
-	double *dev_d = 0;
-	double *dev_D = 0;
+cudaError_t dctWithCuda_2(const float *d, float *D, int nwidth, int nheight){
+	float *dev_d = 0;
+	float *dev_D = 0;
 	float time=0;
 	cudaError_t cudaStatus;
 
@@ -434,27 +483,34 @@ cudaError_t dctWithCuda_2(const double *d, double *D){
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_d,length * length * sizeof(double));
+	cudaStatus = cudaMalloc((void**)&dev_d, nwidth * nheight * sizeof(float));
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
 
-	cudaStatus = cudaMalloc((void**)&dev_D,length * length * sizeof(double));
+	cudaStatus = cudaMalloc((void**)&dev_D, nwidth * nheight * sizeof(float));
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMalloc failed!");
 		goto Error;
 	}
 
 	//copy input vectors from host memory to GPU buffers.
-	cudaStatus = cudaMemcpy(dev_d, d,length * length * sizeof(double),cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(dev_d, d, nwidth * nheight * sizeof(float),cudaMemcpyHostToDevice);
 	if(cudaStatus != cudaSuccess){
 		fprintf(stderr, "cudaMalloc failed");
 		goto Error;
 	}
 
+	dim3 grid(1, 1, 1);
+	dim3 dimblock(16, 16);	
+
+	grid.x = (nwidth + 15) / 16;
+	grid.y = (nheight + 15) / 16;
+
+	dct_2 <<<grid, dimblock >>> (dev_d, dev_D, nwidth, nheight);
 	//launch a kernel on the GPU
-	dct_2<<<1, (length/block_len)*(length/block_len), block_len*block_len>>>(dev_d, dev_D);
+	//dct_2<<<1, (nwidth /block_len)*(nheight /block_len), block_len*block_len>>>(dev_d, dev_D, nwidth, nheight);
 
 	cudaStatus = cudaThreadSynchronize();
     if (cudaStatus != cudaSuccess) {
@@ -466,7 +522,7 @@ cudaError_t dctWithCuda_2(const double *d, double *D){
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0 );
-    cudaStatus = cudaMemcpy(D, dev_D, length*length * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(D, dev_D, nwidth*nheight * sizeof(float), cudaMemcpyDeviceToHost);
         if (cudaStatus != cudaSuccess) {
             fprintf(stderr, "cudaMemcpy failed!");
             goto Error;
