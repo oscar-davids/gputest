@@ -14,5 +14,6 @@ void data_test_derv_1d(float *h_in, float *h_out, float dx, int n);
 void data_test_forw_1d(float *h_in, float *h_out, int n);
 void data_test_back_1d(float *h_in, float *h_out, int n);
 void data_test_derv_2d(float *h_in, float *h_out, float dx, int nx, int ny);
+void data_test_dct_2d(float *h_in, float *h_out, int nx, int ny);
 
 #endif
