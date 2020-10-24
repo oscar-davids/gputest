@@ -400,7 +400,9 @@ void cufft_DCT_2DN(float *d_in, float *d_out, int nx, int ny)
 	float *d_in_tmp;
 	cudaMalloc((void **)&d_in_tmp, nx*ny * sizeof(float));
 
-	cufft_DCT_XYN(d_in, d_in_tmp, nx, ny);
+	//cufft_DCT_XYN(d_in, d_in_tmp, nx, ny);
+	cufft_DCT_XYN(d_in, d_out, nx, ny);
+#if 0
 	/* Allocate memory for transpose matrix */
 	float *d_in_trsp;
 	cudaMalloc((void **)&d_in_trsp, nx*ny * sizeof(float));
@@ -417,7 +419,161 @@ void cufft_DCT_2DN(float *d_in, float *d_out, int nx, int ny)
 
 	/* Deallocate memory */
 	cudaFree(d_in_trsp);
+#endif
 	cudaFree(d_in_tmp);
+}
+static __global__ void R2CDataExtNM(float *d_in, cufftComplex *d_out, int n, int m)
+{
+	//int tid = threadIdx.x;
+	int ix = blockIdx.x * blockDim.x + threadIdx.x;
+	int iy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	//for (int ix=tid; ix<n; ix+=threads_num)
+	int index = iy * n;
+	int tgy = 0;
+	if (ix < n && iy < m)
+	{
+		if (iy & 0x01){
+			tgy = (m - 1 - iy / 2) * n;
+		}
+		else {
+			tgy = (iy / 2) * n;
+		}
+
+		if (ix & 0x01) //odd
+		{
+			d_out[tgy + n - 1 - ix / 2].x = d_in[index + ix];
+			d_out[tgy + n - 1 - ix / 2].y = 0.0f;
+		}
+		else //even
+		{
+			d_out[tgy + ix / 2].x = d_in[index + ix];
+			d_out[tgy + ix / 2].y = 0.0f;
+		}
+	}
+}
+static __global__ void C2CHalfNM(cufftComplex *d_in, cufftComplex *d_out, int n, int m, float fscale)
+{
+	//int tid = threadIdx.x;
+	int ix = blockIdx.x * blockDim.x + threadIdx.x;
+	int iy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	int index = iy * n;
+	float dxa, dyb, dkc, dlc, dks, dls;
+	//for (int ix=tid; ix<n; ix+=threads_num)
+	if (ix < n && iy < m)
+	{
+		dxa = (float)ix*CV_PI_F / (float)(n * 2.0f);
+		dyb = (float)iy*CV_PI_F / (float)(m * 2.0f);
+		dkc = cosf(dxa); dks = sinf(dxa);
+		dlc = cosf(dyb); dls = sinf(dyb);
+
+		d_out[index + ix].x = (d_in[index + ix].x*(dkc*dlc - dks * dls)
+			+ d_in[index + ix].y*(dks*dlc - dkc * dls)) * fscale;// *sqrtf(2.0f / n) * sqrtf(2.0f / m);
+		//d_out[index + ix].y = 0.0f;// (-d_in[ix].x*sinf(d_k) - d_in[ix].y*cosf(d_k)) * sqrtf(2.0f / n);
+		if (ix == 0)
+			d_out[index + ix].x = d_out[index + ix].x * CV_SIN45_F;
+		if (iy == 0)
+			d_out[index + ix].x = d_out[index + ix].x * CV_SIN45_F;
+	}
+}
+static __global__ void C2RDataGetNM(cufftComplex *d_in, float *d_out, int n, int m)
+{
+	//int tid = threadIdx.x;
+	int ix = blockIdx.x * blockDim.x + threadIdx.x;
+	int iy = blockIdx.y * blockDim.y + threadIdx.y;
+
+	//for (int ix=tid; ix<n; ix+=threads_num)
+	int index = iy * n;
+	if (ix < n && iy < m) {
+		//debug
+		//if (ix < 40)
+		//	d_out[ix] = 0.5f;
+		//else
+		d_out[index + ix] = d_in[index + ix].x;
+	}
+}
+static __global__ void Transpose2D(cufftComplex *out, cufftComplex *in, int width, int height)
+{
+	int ix = blockIdx.x*blockDim.x + threadIdx.x;
+	int iy = blockIdx.y*blockDim.y + threadIdx.y;
+	int idx_in = iy * width + ix;
+	int idx_out = ix * height + iy;
+
+	if (ix < width && iy < height)
+		out[idx_out] = in[idx_in];
+}
+#if 0
+void dct2d_cufft(const uchar *src, uchar *dst, int nw, int nh)
+#else
+void dct2d_cufft(float* fin, float* fout, int nw, int nh)
+#endif
+{
+#if 0
+	float* fin = (float*)src;
+	float* fout = (float*)dst;
+
+	cufft_DCT_2DN(fin, fout, nw, nh);
+	cudaSafeCall(cudaGetLastError());
+	cudaSafeCall(cudaDeviceSynchronize());
+#else
+	dim3 grid(1, 1, 1);
+	dim3 dimblock(16, 16);
+
+	grid.x = (nw + BLOCK_SIZE - 1) / BLOCK_SIZE; //divUp(nw, dimblock.x);
+	grid.y = (nh + BLOCK_SIZE - 1) / BLOCK_SIZE; //divUp(nh, dimblock.y);
+
+	//X axis
+	cufftComplex *d_in_ext;
+	cudaMalloc((void **)&d_in_ext, nw* nh * sizeof(cufftComplex));
+	R2CDataExtNM << < grid, dimblock >> > (fin, d_in_ext, nw, nh);
+
+	cufftHandle plan;
+	//cufftPlan2d(&plan, nh, nw, CUFFT_C2C);
+	cufftPlan2d(&plan, nh, nw, CUFFT_C2C);
+
+	cufftComplex *d_out_ext;
+	cudaMalloc((void **)&d_out_ext, nw * nh * sizeof(cufftComplex));
+	cufftExecC2C(plan, d_in_ext, d_out_ext, CUFFT_FORWARD);
+
+	cufftComplex *d_out_ext_shift;
+	cudaMalloc((void **)&d_out_ext_shift, nw * nh * sizeof(cufftComplex));
+	float fscale = 2.0f / sqrtf((float)(nw * nh));
+	C2CHalfNM << < grid, dimblock >> > (d_out_ext, d_out_ext_shift, nw, nh, fscale);
+
+#if 1
+	C2RDataGetNM << < grid, dimblock >> > (d_out_ext_shift, fout, nw, nh);
+#else
+	//float *d_in_tmp;
+	//cudaMalloc((void **)&d_in_tmp, nw*nh * sizeof(float));
+	//transposeReal_2d << <grid, dimblock >> > (d_in_tmp, fout, nx, ny);
+	Transpose2D << <grid, dimblock >> > (d_in_ext, d_out_ext_shift, nw, nh);
+
+	//Y axis
+	cufftHandle plany;
+	cufftPlan2d(&plany, nh, nw, CUFFT_C2C);
+	cufftExecC2C(plany, d_in_ext, d_out_ext, CUFFT_FORWARD);
+
+	C2CHalfNM << < grid, dimblock >> > (d_out_ext, d_out_ext_shift, nh, nw);
+
+	float *d_in_tmp;
+	cudaMalloc((void **)&d_in_tmp, nw*nh * sizeof(float));
+
+	C2RDataGetNM << < grid, dimblock >> > (d_out_ext_shift, d_in_tmp, nh, nw);
+	transposeReal_2d << <grid, dimblock >> > (fout, d_in_tmp, nh, nw);
+	//final convert
+	//transposeReal_2d << <grid, dimblock >> > (fout, d_in_tmp, ny, nx);
+
+	cudaFree(d_in_tmp);
+	cufftDestroy(plany);
+#endif
+
+	cufftDestroy(plan);	
+	cudaFree(d_in_ext);
+	cudaFree(d_out_ext);
+	cudaFree(d_out_ext_shift);
+	
+#endif
 }
 void data_test_dct_2d(float *h_in, float *h_out, int nx, int ny)
 {
@@ -429,7 +585,8 @@ void data_test_dct_2d(float *h_in, float *h_out, int nx, int ny)
 	cudaMalloc((void **)&d_out, nx*ny * sizeof(float));
 
 	//cufft_DCT_2D(d_in, d_out, nx, ny);
-	cufft_DCT_2DN(d_in, d_out, nx, ny);
+	//cufft_DCT_2DN(d_in, d_out, nx, ny);
+	dct2d_cufft(d_in, d_out, nx, ny);
 
 	cudaMemcpy(h_out, d_out, nx*ny * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -467,7 +624,7 @@ int main()
 	reference_frame_v.convertTo(reference_frame_v, CV_32FC1, 1.0 / 255.0);
 	rendition_frame_v.convertTo(rendition_frame_v, CV_32FC1, 1.0 / 255.0);
 
-	//OpenCV DCT 
+	//OpenCV DCT for memory dump
 	dct(reference_frame_v, reference_dct);
 	
 	//Cufft DCT algorithm 
